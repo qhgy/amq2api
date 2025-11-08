@@ -213,6 +213,12 @@ def build_claude_content_block_stop_event(index: int) -> str:
     return build_claude_sse_event("content_block_stop", data)
 
 
+def build_claude_ping_event() -> str:
+    """构建 ping 事件(保持连接活跃)"""
+    data = {"type": "ping"}
+    return build_claude_sse_event("ping", data)
+
+
 def build_claude_message_stop_event(
     input_tokens: int,
     output_tokens: int,
@@ -223,7 +229,7 @@ def build_claude_message_stop_event(
     delta_data = {
         "type": "message_delta",
         "delta": {"stop_reason": stop_reason or "end_turn", "stop_sequence": None},
-        "usage": {"output_tokens": output_tokens}
+        "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens}
     }
     delta_event = build_claude_sse_event("message_delta", delta_data)
 

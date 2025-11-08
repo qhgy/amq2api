@@ -219,12 +219,25 @@ def convert_claude_to_codewhisperer_request(
 
     # 如果有 system prompt，添加到内容前面
     if claude_req.system and formatted_content:
-        formatted_content = (
-            "--- SYSTEM PROMPT BEGIN ---\n"
-            f"{claude_req.system}\n"
-            "--- SYSTEM PROMPT END ---\n\n"
-            f"{formatted_content}"
-        )
+        # 处理 system prompt: 可能是字符串或数组
+        system_text = ""
+        if isinstance(claude_req.system, str):
+            system_text = claude_req.system
+        elif isinstance(claude_req.system, list):
+            # 提取所有文本块的内容
+            text_parts = []
+            for block in claude_req.system:
+                if isinstance(block, dict) and block.get('type') == 'text':
+                    text_parts.append(block.get('text', ''))
+            system_text = '\n'.join(text_parts)
+
+        if system_text:
+            formatted_content = (
+                "--- SYSTEM PROMPT BEGIN ---\n"
+                f"{system_text}\n"
+                "--- SYSTEM PROMPT END ---\n\n"
+                f"{formatted_content}"
+            )
 
     # 步骤 6: 获取 modelId 并映射到 Amazon Q 支持的模型
     model_id = map_claude_model_to_amazonq(claude_req.model)

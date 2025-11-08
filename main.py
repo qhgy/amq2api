@@ -223,7 +223,7 @@ async def create_message(request: Request):
 
         # 返回流式响应
         async def claude_stream():
-            async for event in handle_amazonq_stream(byte_stream(), model=model):
+            async for event in handle_amazonq_stream(byte_stream(), model=model, request_data=request_data):
                 yield event
 
         return StreamingResponse(

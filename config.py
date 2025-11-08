@@ -34,6 +34,9 @@ class GlobalConfig:
     # 服务配置
     port: int = 8080
 
+    # Token 统计配置
+    zero_input_token_models: list = field(default_factory=lambda: ["haiku"])
+
     # 动态更新的 token 信息
     access_token: Optional[str] = None
     token_expires_at: Optional[datetime] = None
@@ -93,6 +96,7 @@ async def read_global_config() -> GlobalConfig:
     async with _config_lock:
         if _global_config is None:
             # 从环境变量初始化配置
+            zero_token_models = os.getenv("ZERO_INPUT_TOKEN_MODELS", "haiku")
             _global_config = GlobalConfig(
                 refresh_token=os.getenv("AMAZONQ_REFRESH_TOKEN", ""),
                 client_id=os.getenv("AMAZONQ_CLIENT_ID", ""),
@@ -100,7 +104,8 @@ async def read_global_config() -> GlobalConfig:
                 profile_arn=os.getenv("AMAZONQ_PROFILE_ARN") or None,
                 api_endpoint=os.getenv("AMAZONQ_API_ENDPOINT", "https://q.us-east-1.amazonaws.com/"),
                 token_endpoint=os.getenv("AMAZONQ_TOKEN_ENDPOINT", "https://oidc.us-east-1.amazonaws.com/token"),
-                port=int(os.getenv("PORT", "8080"))
+                port=int(os.getenv("PORT", "8080")),
+                zero_input_token_models=[m.strip() for m in zero_token_models.split(",")]
             )
 
             # 验证必需的配置项

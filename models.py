@@ -52,7 +52,7 @@ class ClaudeRequest:
     temperature: Optional[float] = None
     tools: Optional[List[ClaudeTool]] = None
     stream: bool = True
-    system: Optional[str] = None
+    system: Optional[Union[str, List[Dict[str, Any]]]] = None  # 可以是字符串或数组
 
 
 # ============================================================================
