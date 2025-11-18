@@ -12,7 +12,12 @@ from typing import Dict, List, Any, Optional
 from datetime import datetime
 
 # 数据库路径
-DB_PATH = Path(__file__).parent / "accounts.db"
+# 优先使用 /app/data 目录（Docker 卷），否则使用当前目录
+import os
+if os.path.exists("/app/data"):
+    DB_PATH = Path("/app/data/accounts.db")
+else:
+    DB_PATH = Path(__file__).parent / "accounts.db"
 
 
 def _ensure_db():

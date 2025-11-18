@@ -17,9 +17,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # 复制应用代码
 COPY *.py .
+COPY frontend/ ./frontend/
 
-# 创建非 root 用户
-RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
+# 创建数据目录和非 root 用户
+RUN mkdir -p /app/data && \
+    useradd -m -u 1000 appuser && \
+    chown -R appuser:appuser /app
 USER appuser
 
 # 暴露端口
