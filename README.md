@@ -6,9 +6,11 @@
 
 - ✅ 完整的 Claude API 兼容接口
 - ✅ 多账号管理和负载均衡
+- ✅ 支持 Amazon Q 和 Gemini 双后端
 - ✅ 自动 Token 刷新机制（JWT 过期检测）
 - ✅ 账号封禁自动检测和禁用
 - ✅ Web 管理界面（账号管理、批量导入/导出、健康检查）
+- ✅ Gemini OAuth 凭证自动获取工具
 - ✅ SSE 流式响应支持
 - ✅ 请求/响应格式自动转换
 - ✅ 完善的错误处理和日志
@@ -28,7 +30,7 @@ Amazon Q Event Stream → event_stream_parser.py → parser.py → stream_handle
 
 - **main.py** - FastAPI 服务器,处理 `/v1/messages` 和管理 API 端点
 - **account_manager.py** - 多账号管理（SQLite 数据库）
-- **auth.py** - Token 自动刷新机制（JWT 过期检测）
+- **auth.py** - Amazon Q Token 自动刷新机制（JWT 过期检测）
 - **converter.py** - 请求格式转换 (Claude → Amazon Q)
 - **event_stream_parser.py** - 解析 AWS Event Stream 二进制格式
 - **parser.py** - 事件类型转换 (Amazon Q → Claude)
@@ -37,6 +39,12 @@ Amazon Q Event Stream → event_stream_parser.py → parser.py → stream_handle
 - **config.py** - 配置管理和 Token 缓存
 - **models.py** - 数据结构定义
 - **frontend/index.html** - Web 管理界面
+- **gemini/** - Gemini 模块
+  - **auth.py** - Gemini Token 管理
+  - **converter.py** - 请求格式转换 (Claude → Gemini)
+  - **handler.py** - Gemini 流式响应处理
+  - **models.py** - Gemini 数据模型
+- **gemini_oauth_client.py** - Gemini OAuth 凭证获取工具（独立脚本）
 
 ## 快速开始
 
@@ -134,6 +142,46 @@ curl -X POST http://localhost:8080/v1/messages \
 | `AMAZONQ_API_ENDPOINT` | ❌ | https://q.us-east-1.amazonaws.com/ | API 端点 |
 | `AMAZONQ_TOKEN_ENDPOINT` | ❌ | https://oidc.us-east-1.amazonaws.com/token | Token 端点 |
 
+## Gemini OAuth 凭证获取
+
+### 使用独立脚本获取凭证
+
+项目提供了独立的 OAuth 客户端脚本，用于获取 Gemini 的 OAuth 凭证：
+
+```bash
+# 安装依赖
+pip install aiohttp httpx
+
+# 运行脚本
+python3 gemini_oauth_client.py
+```
+
+**脚本功能：**
+1. 自动启动本地回调服务器（端口 63902）
+2. 自动打开浏览器进行 Google 授权
+3. 接收授权码并交换 tokens
+4. 打印完整凭证信息（client_id、client_secret、refresh_token）
+5. 可选保存到 `gemini_credentials.json` 文件
+
+**获取到的凭证可用于：**
+- 在 Web 管理界面创建 Gemini 账号
+- 通过 API 添加 Gemini 账号（`type: "gemini"`）
+
+### Gemini 账号配置
+
+创建 Gemini 账号时需要提供：
+
+```json
+{
+  "label": "Gemini 账号 1",
+  "clientId": "xxxxxxxxxxxxxxxxxxxxxx.apps.googleusercontent.com",
+  "clientSecret": "GOCSPX-xxxxxxxxxxxxxxxxxxxxxx",
+  "refreshToken": "从 OAuth 流程获取的 refresh_token",
+  "type": "gemini",
+  "enabled": true
+}
+```
+
 ## 多账号管理
 
 ### Web 管理界面
@@ -155,7 +203,7 @@ curl -X POST http://localhost:8080/v1/messages \
 #### POST /v2/accounts
 创建新账号
 
-**请求体：**
+**请求体（Amazon Q）：**
 ```json
 {
   "label": "账号标签",
@@ -163,7 +211,24 @@ curl -X POST http://localhost:8080/v1/messages \
   "clientSecret": "client_secret",
   "refreshToken": "refresh_token",
   "accessToken": "access_token",
+  "type": "amazonq",
   "enabled": true
+}
+```
+
+**请求体（Gemini）：**
+```json
+{
+  "label": "Gemini 账号",
+  "clientId": "xxxxxxxxxxxxxxxxxxxxxxxxxx.apps.googleusercontent.com",
+  "clientSecret": "GOCSPX-xxxxxxxxxxxxxxxxxxxxx",
+  "refreshToken": "从 OAuth 获取的 refresh_token",
+  "type": "gemini",
+  "enabled": true,
+  "other": {
+    "project": "your-gcp-project-id",
+    "api_endpoint": "https://daily-cloudcode-pa.sandbox.googleapis.com"
+  }
 }
 ```
 
@@ -190,7 +255,7 @@ curl -X POST http://localhost:8080/v1/messages \
 
 ### POST /v1/messages
 
-创建消息（Claude API 兼容）
+创建消息（Claude API 兼容，使用 Amazon Q 后端）
 
 **请求体：**
 
@@ -209,6 +274,35 @@ curl -X POST http://localhost:8080/v1/messages \
   "system": "你是一个有帮助的助手"
 }
 ```
+
+**响应：**
+
+流式 SSE 响应，格式与 Claude API 完全兼容。
+
+### POST /v1/gemini/messages
+
+创建消息（Claude API 兼容，使用 Gemini 后端）
+
+**请求体：**
+
+```json
+{
+  "model": "claude-sonnet-4.5",
+  "messages": [
+    {
+      "role": "user",
+      "content": "你好"
+    }
+  ],
+  "max_tokens": 4096,
+  "temperature": 0.7,
+  "stream": true,
+  "system": "你是一个有帮助的助手"
+}
+```
+
+**请求头（可选）：**
+- `X-Account-ID`: 指定使用的 Gemini 账号 ID（不指定则随机选择）
 
 **响应：**
 
@@ -289,21 +383,33 @@ Claude Code 客户端
 
 ```
 amq2api/
-├── .env.example          # 环境变量模板
-├── .gitignore           # Git 忽略文件
-├── README.md            # 使用说明
-├── DOCKER_DEPLOY.md     # Docker 部署文档
-├── Dockerfile           # Docker 镜像构建
-├── docker-compose.yml   # Docker Compose 配置
-├── requirements.txt     # Python 依赖
-├── start.sh            # 启动脚本
-├── config.py           # 配置管理
-├── auth.py             # 认证模块
-├── models.py           # 数据结构
-├── converter.py        # 请求转换
-├── parser.py           # 事件解析
-├── stream_handler.py   # 流处理
-└── main.py             # 主服务
+├── .env.example              # 环境变量模板
+├── .gitignore               # Git 忽略文件
+├── README.md                # 使用说明
+├── DOCKER_DEPLOY.md         # Docker 部署文档
+├── Dockerfile               # Docker 镜像构建
+├── docker-compose.yml       # Docker Compose 配置
+├── requirements.txt         # Python 依赖
+├── start.sh                # 启动脚本
+├── config.py               # 配置管理
+├── auth.py                 # Amazon Q 认证模块
+├── account_manager.py      # 多账号管理
+├── models.py               # 数据结构
+├── converter.py            # Amazon Q 请求转换
+├── parser.py               # Amazon Q 事件解析
+├── event_stream_parser.py  # AWS Event Stream 解析
+├── stream_handler_new.py   # Amazon Q 流处理
+├── message_processor.py    # 消息处理
+├── main.py                 # 主服务
+├── frontend/
+│   └── index.html         # Web 管理界面
+├── gemini/                 # Gemini 模块
+│   ├── __init__.py
+│   ├── auth.py            # Gemini Token 管理
+│   ├── converter.py       # Gemini 请求转换
+│   ├── handler.py         # Gemini 流处理
+│   └── models.py          # Gemini 数据模型
+└── gemini_oauth_client.py  # Gemini OAuth 凭证获取工具
 ```
 
 ### 扩展功能
