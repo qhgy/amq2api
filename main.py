@@ -456,11 +456,11 @@ async def create_gemini_message(request: Request):
                 raise HTTPException(status_code=400, detail=f"账号类型不是 Gemini: {specified_account_id}")
             logger.info(f"使用指定 Gemini 账号: {account['label']} (ID: {account['id']})")
         else:
-            # 随机选择 Gemini 账号
-            account = get_random_account(account_type="gemini")
+            # 随机选择 Gemini 账号（根据模型配额过滤）
+            account = get_random_account(account_type="gemini", model=claude_req.model)
             if not account:
-                raise HTTPException(status_code=503, detail="没有可用的 Gemini 账号")
-            logger.info(f"使用随机 Gemini 账号: {account['label']} (ID: {account['id']})")
+                raise HTTPException(status_code=503, detail=f"没有可用的 Gemini 账号支持模型 {claude_req.model}")
+            logger.info(f"使用随机 Gemini 账号: {account['label']} (ID: {account['id']}) - 模型: {claude_req.model}")
 
         # 初始化 Token 管理器
         other = account.get("other") or {}
@@ -515,10 +515,59 @@ async def create_gemini_message(request: Request):
                     ) as response:
                         if response.status_code != 200:
                             error_text = await response.aread()
-                            logger.error(f"Gemini API 错误: {response.status_code} {error_text}")
+                            error_str = error_text.decode() if isinstance(error_text, bytes) else str(error_text)
+                            logger.error(f"Gemini API 错误: {response.status_code} {error_str}")
+
+                            # 处理 429 Resource Exhausted 错误
+                            if response.status_code == 429:
+                                try:
+                                    from account_manager import mark_model_exhausted, update_account
+                                    from gemini.converter import map_claude_model_to_gemini
+
+                                    # 获取 Gemini 模型名称
+                                    gemini_model = map_claude_model_to_gemini(claude_req.model)
+                                    logger.info(f"收到 429 错误，正在调用 fetchAvailableModels 获取账号 {account['id']} 的最新配额信息...")
+
+                                    # 调用 fetchAvailableModels 获取最新配额信息
+                                    models_data = await token_manager.fetch_available_models(project_id)
+
+                                    # 从 models_data 中提取该模型的 quotaInfo.resetTime
+                                    reset_time = None
+                                    models = models_data.get("models", {})
+                                    if gemini_model in models:
+                                        quota_info = models[gemini_model].get("quotaInfo", {})
+                                        reset_time = quota_info.get("resetTime")
+
+                                    # 如果没有找到 resetTime，使用默认值（1小时后）
+                                    if not reset_time:
+                                        from datetime import datetime, timedelta, timezone
+                                        reset_time = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat().replace('+00:00', 'Z')
+                                        logger.warning(f"未找到模型 {gemini_model} 的 resetTime，使用默认值: {reset_time}")
+
+                                    # 更新账号的 creditsInfo
+                                    credits_info = extract_credits_from_models_data(models_data)
+                                    other = account.get("other") or {}
+                                    if isinstance(other, str):
+                                        import json
+                                        try:
+                                            other = json.loads(other)
+                                        except json.JSONDecodeError:
+                                            other = {}
+
+                                    other["creditsInfo"] = credits_info
+                                    update_account(account['id'], other=other)
+                                    logger.info(f"已更新账号 {account['id']} 的配额信息")
+
+                                    # 标记模型配额用完
+                                    mark_model_exhausted(account['id'], gemini_model, reset_time)
+                                    logger.warning(f"账号 {account['id']} 的模型 {gemini_model} 配额已用完，重置时间: {reset_time}")
+
+                                except Exception as e:
+                                    logger.error(f"处理 429 错误时出错: {e}", exc_info=True)
+
                             raise HTTPException(
                                 status_code=response.status_code,
-                                detail=f"Gemini API 错误: {error_text.decode()}"
+                                detail=f"Gemini API 错误: {error_str}"
                             )
 
                         # 返回字节流
@@ -727,7 +776,120 @@ async def donate_page():
     return FileResponse(str(frontend_path))
 
 
+# OAuth 回调页面
+@app.get("/oauth-callback-page", response_class=FileResponse)
+async def oauth_callback_page():
+    """OAuth 回调页面"""
+    from pathlib import Path
+    frontend_path = Path(__file__).parent / "frontend" / "oauth-callback-page.html"
+    if not frontend_path.exists():
+        raise HTTPException(status_code=404, detail="回调页面不存在")
+    return FileResponse(str(frontend_path))
+
+
 # Gemini OAuth 回调处理
+@app.post("/api/gemini/oauth-callback")
+async def gemini_oauth_callback_post(request: Request):
+    """处理 Gemini OAuth 回调（POST 请求）"""
+    try:
+        body = await request.json()
+        code = body.get("code")
+
+        if not code:
+            raise HTTPException(status_code=400, detail="缺少授权码")
+
+        # 使用固定的 client credentials
+        client_id = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
+        client_secret = "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"
+
+        # 交换授权码获取 tokens
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                "https://oauth2.googleapis.com/token",
+                data={
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "code": code,
+                    "grant_type": "authorization_code",
+                    "redirect_uri": f"{get_base_url()}/oauth-callback-page"
+                },
+                headers={
+                    'x-goog-api-client': 'gl-node/22.18.0',
+                    'User-Agent': 'google-api-nodejs-client/10.3.0'
+                }
+            )
+
+            if response.status_code != 200:
+                error_msg = f"Token 交换失败: {response.text}"
+                logger.error(error_msg)
+                raise HTTPException(status_code=400, detail=error_msg)
+
+            tokens = response.json()
+            refresh_token = tokens.get('refresh_token')
+
+            if not refresh_token:
+                raise HTTPException(status_code=400, detail="未获取到 refresh_token")
+
+        # 测试账号可用性（获取项目 ID）
+        token_manager = GeminiTokenManager(
+            client_id=client_id,
+            client_secret=client_secret,
+            refresh_token=refresh_token,
+            api_endpoint="https://daily-cloudcode-pa.sandbox.googleapis.com"
+        )
+
+        try:
+            project_id = await token_manager.get_project_id()
+            logger.info(f"账号验证成功，项目 ID: {project_id}")
+        except Exception as e:
+            error_msg = f"账号验证失败: {str(e)}"
+            logger.error(error_msg)
+            raise HTTPException(status_code=400, detail=error_msg)
+
+        # 获取配额信息
+        try:
+            models_data = await token_manager.fetch_available_models(project_id)
+            credits_info = extract_credits_from_models_data(models_data)
+            reset_time = extract_reset_time_from_models_data(models_data)
+        except Exception as e:
+            logger.warning(f"获取配额信息失败: {e}")
+            credits_info = {"models": {}, "summary": {"totalModels": 0, "averageRemaining": 0}}
+            reset_time = None
+
+        # 自动导入到数据库
+        import uuid
+        from datetime import datetime
+
+        label = f"Gemini-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        other_data = {
+            "project": project_id,
+            "api_endpoint": "https://daily-cloudcode-pa.sandbox.googleapis.com",
+            "creditsInfo": credits_info,
+            "resetTime": reset_time
+        }
+
+        account = create_account(
+            label=label,
+            client_id=client_id,
+            client_secret=client_secret,
+            refresh_token=refresh_token,
+            access_token=tokens.get('access_token', ''),
+            other=other_data,
+            enabled=True,
+            account_type="gemini"
+        )
+        logger.info(f"Gemini 账号已添加: {label}")
+
+        return JSONResponse(content={"success": True, "message": "账号添加成功"})
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"处理 OAuth 回调失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Gemini OAuth 回调处理（GET 请求，保留兼容性）
 @app.get("/api/gemini/oauth-callback")
 async def gemini_oauth_callback(code: Optional[str] = None, error: Optional[str] = None):
     """处理 Gemini OAuth 回调"""
@@ -741,6 +903,7 @@ async def gemini_oauth_callback(code: Optional[str] = None, error: Optional[str]
     if not code:
         raise HTTPException(status_code=400, detail="缺少授权码")
 
+    from fastapi.responses import RedirectResponse
     try:
         # 使用固定的 client credentials
         client_id = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
@@ -807,40 +970,38 @@ async def gemini_oauth_callback(code: Optional[str] = None, error: Optional[str]
         # 获取配额信息
         try:
             models_data = await token_manager.fetch_available_models(project_id)
-            credits = extract_credits_from_models_data(models_data)
+            credits_info = extract_credits_from_models_data(models_data)
             reset_time = extract_reset_time_from_models_data(models_data)
         except Exception as e:
             logger.warning(f"获取配额信息失败: {e}")
-            credits = 0
+            credits_info = {"models": {}, "summary": {"totalModels": 0, "averageRemaining": 0}}
             reset_time = None
 
         # 自动导入到数据库
         import uuid
         from datetime import datetime
-        account_data = {
-            "id": str(uuid.uuid4()),
-            "label": f"Gemini-{datetime.now().strftime('%Y%m%d-%H%M%S')}",
-            "clientId": client_id,
-            "clientSecret": client_secret,
-            "refreshToken": refresh_token,
-            "accessToken": tokens.get('access_token', ''),
-            "other": {
-                "project": project_id,
-                "api_endpoint": "https://daily-cloudcode-pa.sandbox.googleapis.com",
-                "credits": credits,
-                "resetTime": reset_time
-            },
-            "type": "gemini",
-            "enabled": True,
-            "created_at": datetime.now().isoformat(),
-            "updated_at": datetime.now().isoformat()
+
+        label = f"Gemini-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        other_data = {
+            "project": project_id,
+            "api_endpoint": "https://daily-cloudcode-pa.sandbox.googleapis.com",
+            "creditsInfo": credits_info,
+            "resetTime": reset_time
         }
 
-        create_account(account_data)
-        logger.info(f"Gemini 账号已添加: {account_data['label']}")
+        account = create_account(
+            label=label,
+            client_id=client_id,
+            client_secret=client_secret,
+            refresh_token=refresh_token,
+            access_token=tokens.get('access_token', ''),
+            other=other_data,
+            enabled=True,
+            account_type="gemini"
+        )
+        logger.info(f"Gemini 账号已添加: {label}")
 
         # 重定向回投喂站页面
-        from fastapi.responses import RedirectResponse
         return RedirectResponse(url="/donate?success=true", status_code=302)
 
     except Exception as e:
@@ -881,22 +1042,17 @@ async def get_gemini_accounts():
                 project_id = other.get("project") or await token_manager.get_project_id()
                 models_data = await token_manager.fetch_available_models(project_id)
 
-                credits = extract_credits_from_models_data(models_data)
-                reset_time = extract_reset_time_from_models_data(models_data)
+                credits_info = extract_credits_from_models_data(models_data)
 
                 # 更新 other 字段
-                other["credits"] = credits
-                other["resetTime"] = reset_time
+                other["creditsInfo"] = credits_info
                 other["project"] = project_id
-
-                total_credits += credits
 
                 updated_accounts.append({
                     "id": account.get("id", ""),
                     "label": account.get("label", "未命名"),
                     "enabled": account.get("enabled", False),
-                    "credits": credits,
-                    "resetTime": reset_time,
+                    "creditsInfo": credits_info,
                     "projectId": project_id,
                     "created_at": account.get("created_at")
                 })
@@ -921,8 +1077,29 @@ async def get_gemini_accounts():
                     "created_at": account.get("created_at")
                 })
 
+        # 计算每个模型的总配额
+        model_totals = {}
+        for account in updated_accounts:
+            credits_info = account.get("creditsInfo", {})
+            models = credits_info.get("models", {})
+            for model_id, model_info in models.items():
+                if model_info.get("recommended"):
+                    if model_id not in model_totals:
+                        model_totals[model_id] = {
+                            "displayName": model_info.get("displayName", model_id),
+                            "totalRemaining": 0,
+                            "accountCount": 0
+                        }
+                    model_totals[model_id]["totalRemaining"] += model_info.get("remainingFraction", 0)
+                    model_totals[model_id]["accountCount"] += 1
+
+        # 计算每个模型的平均配额百分比
+        for model_id in model_totals:
+            avg_fraction = model_totals[model_id]["totalRemaining"] / model_totals[model_id]["accountCount"]
+            model_totals[model_id]["averagePercent"] = int(avg_fraction * 100)
+
         return JSONResponse(content={
-            "totalCredits": total_credits,
+            "modelTotals": model_totals,
             "activeCount": len([a for a in accounts if a.get("enabled")]),
             "totalCount": len(accounts),
             "accounts": updated_accounts
@@ -942,34 +1119,84 @@ def get_base_url() -> str:
         return base_url.rstrip('/')
 
     # 默认使用 localhost
-    port = os.getenv("PORT", "8080")
+    port = os.getenv("PORT", "8383")
     return f"http://localhost:{port}"
 
 
-def extract_credits_from_models_data(models_data: dict) -> int:
-    """从模型数据中提取 credits"""
+def extract_credits_from_models_data(models_data: dict) -> dict:
+    """从模型数据中提取各个模型的 credits 信息
+
+    返回格式:
+    {
+        "models": {
+            "gemini-3-pro-high": {"remainingFraction": 0.21, "resetTime": "2025-11-20T16:12:51Z"},
+            "claude-sonnet-4-5": {"remainingFraction": 0.81, "resetTime": "2025-11-20T16:18:40Z"},
+            ...
+        },
+        "summary": {
+            "totalModels": 5,
+            "averageRemaining": 0.75
+        }
+    }
+    """
     try:
-        # 根据实际 API 响应结构提取 credits
-        # 这里需要根据实际返回的数据结构调整
-        if "quota" in models_data:
-            return models_data["quota"].get("remaining", 0)
-        elif "credits" in models_data:
-            return models_data.get("credits", 0)
-        return 0
+        models = models_data.get("models", {})
+        result = {
+            "models": {},
+            "summary": {
+                "totalModels": 0,
+                "averageRemaining": 0
+            }
+        }
+
+        total_fraction = 0
+        count = 0
+
+        for model_id, model_info in models.items():
+            quota_info = model_info.get("quotaInfo", {})
+            remaining_fraction = quota_info.get("remainingFraction")
+            reset_time = quota_info.get("resetTime")
+
+            if remaining_fraction is not None:
+                result["models"][model_id] = {
+                    "displayName": model_info.get("displayName", model_id),
+                    "remainingFraction": remaining_fraction,
+                    "remainingPercent": int(remaining_fraction * 100),
+                    "resetTime": reset_time,
+                    "recommended": model_info.get("recommended", False)
+                }
+                total_fraction += remaining_fraction
+                count += 1
+
+        if count > 0:
+            result["summary"]["totalModels"] = count
+            result["summary"]["averageRemaining"] = total_fraction / count
+
+        return result
     except Exception as e:
         logger.error(f"提取 credits 失败: {e}")
-        return 0
+        return {"models": {}, "summary": {"totalModels": 0, "averageRemaining": 0}}
 
 
 def extract_reset_time_from_models_data(models_data: dict) -> Optional[str]:
-    """从模型数据中提取重置时间"""
+    """从模型数据中提取最早的重置时间
+
+    返回 ISO 8601 格式的时间字符串
+    """
     try:
-        # 根据实际 API 响应结构提取重置时间
-        # 这里需要根据实际返回的数据结构调整
-        if "quota" in models_data:
-            return models_data["quota"].get("resetTime")
-        elif "resetTime" in models_data:
-            return models_data.get("resetTime")
+        models = models_data.get("models", {})
+
+        reset_times = []
+        for model_id, model_info in models.items():
+            quota_info = model_info.get("quotaInfo", {})
+            reset_time = quota_info.get("resetTime")
+            if reset_time:
+                reset_times.append(reset_time)
+
+        # 返回最早的重置时间
+        if reset_times:
+            return min(reset_times)
+
         return None
     except Exception as e:
         logger.error(f"提取重置时间失败: {e}")

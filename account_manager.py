@@ -7,9 +7,12 @@ import json
 import uuid
 import time
 import random
+import logging
 from pathlib import Path
 from typing import Dict, List, Any, Optional
-from datetime import datetime
+from datetime import datetime, timezone
+
+logger = logging.getLogger(__name__)
 
 # 数据库路径
 # 优先使用 /app/data 目录（Docker 卷），否则使用当前目录
@@ -83,11 +86,33 @@ def list_enabled_accounts(account_type: Optional[str] = None) -> List[Dict[str, 
         return [_row_to_dict(r) for r in rows]
 
 
-def get_random_account(account_type: Optional[str] = None) -> Optional[Dict[str, Any]]:
-    """随机选择一个启用的账号"""
+def get_random_account(account_type: Optional[str] = None, model: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """随机选择一个启用的账号
+
+    Args:
+        account_type: 账号类型 ('amazonq' 或 'gemini')
+        model: 请求的模型名称（用于 Gemini 账号配额检查）
+
+    Returns:
+        符合条件的随机账号，如果没有可用账号则返回 None
+    """
     accounts = list_enabled_accounts(account_type)
     if not accounts:
         return None
+
+    # 如果是 Gemini 账号且指定了模型，需要检查配额
+    if account_type == "gemini" and model:
+        available_accounts = []
+        for account in accounts:
+            if is_model_available_for_account(account, model):
+                available_accounts.append(account)
+
+        if not available_accounts:
+            logger.warning(f"没有可用的 Gemini 账号支持模型 {model}")
+            return None
+
+        return random.choice(available_accounts)
+
     return random.choice(accounts)
 
 
@@ -299,6 +324,157 @@ def list_all_accounts() -> List[Dict[str, Any]]:
     with _conn() as conn:
         rows = conn.execute("SELECT * FROM accounts ORDER BY created_at DESC").fetchall()
         return [_row_to_dict(r) for r in rows]
+
+
+def is_model_available_for_account(account: Dict[str, Any], model: str) -> bool:
+    """检查账号的指定模型是否有配额可用
+
+    Args:
+        account: 账号信息
+        model: 模型名称
+
+    Returns:
+        True 如果模型可用，False 如果配额已用完或需要等待重置
+    """
+    other = account.get("other", {})
+    if isinstance(other, str):
+        try:
+            other = json.loads(other)
+        except json.JSONDecodeError:
+            return True  # 如果解析失败，默认认为可用
+
+    if not other:
+        other = {}
+    credits_info = other.get("creditsInfo", {})
+    models = credits_info.get("models", {})
+
+    # 如果没有该模型的配额信息，默认认为可用
+    if model not in models:
+        return True
+
+    model_info = models[model]
+    remaining_fraction = model_info.get("remainingFraction", 1.0)
+    reset_time_str = model_info.get("resetTime")
+
+    # 如果配额大于 0，可用
+    if remaining_fraction > 0:
+        return True
+
+    # 如果配额为 0，检查是否已经到重置时间，并尝试自动恢复
+    if reset_time_str:
+        try:
+            reset_time = datetime.fromisoformat(reset_time_str.replace('Z', '+00:00'))
+            now = datetime.now(timezone.utc)
+
+            # 如果已经过了重置时间，尝试自动恢复配额
+            if now >= reset_time:
+                account_id = account.get('id')
+                if account_id and restore_model_quota_if_needed(account_id, model):
+                    logger.info(f"模型 {model} 配额已自动恢复，账号 {account_id} 可用")
+                    return True
+        except Exception as e:
+            logger.error(f"解析重置时间失败: {e}")
+
+    logger.debug(f"模型 {model} 配额不足，账号 {account.get('id')} 不可用")
+    return False
+
+
+def restore_model_quota_if_needed(account_id: str, model: str) -> bool:
+    """检查并恢复模型配额（如果已到重置时间）
+
+    Args:
+        account_id: 账号 ID
+        model: 模型名称
+
+    Returns:
+        True 如果配额已恢复，False 如果仍需等待
+    """
+    account = get_account(account_id)
+    if not account:
+        logger.error(f"账号 {account_id} 不存在")
+        return False
+
+    other = account.get("other", {})
+    if isinstance(other, str):
+        try:
+            other = json.loads(other)
+        except json.JSONDecodeError:
+            return False
+
+    credits_info = other.get("creditsInfo", {})
+    models = credits_info.get("models", {})
+
+    if model not in models:
+        return True  # 没有配额信息，认为可用
+
+    model_info = models[model]
+    remaining_fraction = model_info.get("remainingFraction", 1.0)
+    reset_time_str = model_info.get("resetTime")
+
+    # 如果配额已经大于 0，不需要恢复
+    if remaining_fraction > 0:
+        return True
+
+    # 检查是否已到重置时间
+    if reset_time_str:
+        try:
+            reset_time = datetime.fromisoformat(reset_time_str.replace('Z', '+00:00'))
+            now = datetime.now(timezone.utc)
+
+            if now >= reset_time:
+                # 已到重置时间，恢复配额为 1.0
+                model_info["remainingFraction"] = 1.0
+                model_info["remainingPercent"] = 100
+
+                # 更新数据库
+                update_account(account_id, other=other)
+                logger.info(f"已自动恢复账号 {account_id} 的模型 {model} 配额")
+                return True
+        except Exception as e:
+            logger.error(f"恢复配额时出错: {e}")
+
+    return False
+
+
+def mark_model_exhausted(account_id: str, model: str, reset_time: str) -> None:
+    """标记账号的某个模型配额已用完
+
+    Args:
+        account_id: 账号 ID
+        model: 模型名称
+        reset_time: 配额重置时间 (ISO 8601 格式)
+    """
+    account = get_account(account_id)
+    if not account:
+        logger.error(f"账号 {account_id} 不存在")
+        return
+
+    other = account.get("other", {})
+    if isinstance(other, str):
+        try:
+            other = json.loads(other)
+        except json.JSONDecodeError:
+            other = {}
+
+    # 保 creditsInfo 结构存在
+    if "creditsInfo" not in other:
+        other["creditsInfo"] = {"models": {}, "summary": {"totalModels": 0, "averageRemaining": 0}}
+
+    credits_info = other["creditsInfo"]
+    if "models" not in credits_info:
+        credits_info["models"] = {}
+
+    # 更新模型配额信息
+    if model not in credits_info["models"]:
+        credits_info["models"][model] = {}
+
+    credits_info["models"][model]["remainingFraction"] = 0
+    credits_info["models"][model]["remainingPercent"] = 0
+    credits_info["models"][model]["resetTime"] = reset_time
+
+    # 更新数据库
+    update_account(account_id, other=other)
+    logger.info(f"已标记账号 {account_id} 的模型 {model} 配额用完，重置时间: {reset_time}")
 
 
 # 初始化数据库

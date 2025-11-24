@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Gemini 投喂站</title>
+    <title>Antigravity 投喂站</title>
     <style>
         * {
             margin: 0;
@@ -232,16 +232,12 @@
 <body>
     <div class="container">
         <div class="header">
-            <h1>🎁 Gemini 投喂站</h1>
+            <h1>🎁 Antigravity 投喂站</h1>
             <p>分享你的 Gemini 账号，让更多人体验 AI 的魅力</p>
         </div>
 
         <div class="stats-card">
             <div class="stats-grid">
-                <div class="stat-item">
-                    <div class="stat-label">总 Credits</div>
-                    <div class="stat-value" id="totalCredits">-</div>
-                </div>
                 <div class="stat-item">
                     <div class="stat-label">活跃账号</div>
                     <div class="stat-value" id="activeAccounts">-</div>
@@ -251,6 +247,7 @@
                     <div class="stat-value" id="totalAccounts">-</div>
                 </div>
             </div>
+            <div id="modelTotalsContainer" style="margin-top: 20px;"></div>
             <button class="donate-button" onclick="startDonation()">
                 ✨ 投喂我的 Gemini 账号
             </button>
@@ -268,11 +265,11 @@
     </div>
 
     <script>
-        // 启动投喂流程
+        // 启动投喂流程（使用弹出窗口）
         function startDonation() {
             // 构建 OAuth URL
             const clientId = '1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com';
-            const redirectUri = `${window.location.origin}/api/gemini/oauth-callback`;
+            const redirectUri = `${window.location.origin}/oauth-callback-page`;
             const scopes = [
                 'https://www.googleapis.com/auth/cloud-platform',
                 'https://www.googleapis.com/auth/userinfo.email',
@@ -291,8 +288,86 @@
                 `&prompt=consent` +
                 `&state=${state}`;
 
-            // 打开授权页面
-            window.location.href = authUrl;
+            // 打开弹出窗口
+            const width = 600;
+            const height = 700;
+            const left = (screen.width - width) / 2;
+            const top = (screen.height - height) / 2;
+            const popup = window.open(
+                authUrl,
+                'OAuth Authorization',
+                `width=${width},height=${height},left=${left},top=${top},toolbar=no,menubar=no,location=no,status=no`
+            );
+
+            if (!popup) {
+                alert('弹出窗口被阻止，请允许弹出窗口后重试');
+                return;
+            }
+
+            // 监听来自弹出窗口的消息
+            window.addEventListener('message', handleOAuthMessage);
+        }
+
+        // 处理 OAuth 回调消息
+        async function handleOAuthMessage(event) {
+            // 验证消息来源
+            if (event.origin !== window.location.origin) {
+                return;
+            }
+
+            const { type, code, error } = event.data;
+
+            if (type === 'oauth-error') {
+                const accountsList = document.getElementById('accountsList');
+                accountsList.insertAdjacentHTML('afterbegin', `
+                    <div class="error">
+                        ❌ 授权失败: ${escapeHtml(error)}
+                    </div>
+                `);
+                // 移除事件听
+                window.removeEventListener('message', handleOAuthMessage);
+                return;
+            }
+
+            if (type === 'oauth-success' && code) {
+                try {
+                    // 提交 code 到后端
+                    const response = await fetch('/api/gemini/oauth-callback', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({ code })
+                    });
+
+                    if (!response.ok) {
+                        const errorData = await response.json();
+                        throw new Error(errorData.detail || '提交失败');
+                    }
+
+                    // 成功
+                    const accountsList = document.getElementById('accountsList');
+                    accountsList.insertAdjacentHTML('afterbegin', `
+                        <div class="success">
+                            ✓ 账号添加成功！感谢你的投喂 🎉
+                        </div>
+                    `);
+
+                    // 刷新账号列表
+                    setTimeout(() => loadAccounts(), 1000);
+
+                } catch (err) {
+                    const accountsList = document.getElementById('accountsList');
+                    accountsList.insertAdjacentHTML('afterbegin', `
+                        <div class="error">
+                            ❌ 添加失败: ${escapeHtml(err.message)}
+                        </div>
+                    `);
+                }
+
+                // 移除事件监听
+                window.removeEventListener('message', handleOAuthMessage);
+            }
         }
 
         // 生成随机 state
@@ -326,9 +401,36 @@
             const accountsList = document.getElementById('accountsList');
 
             // 更新统计数据
-            document.getElementById('totalCredits').textContent = formatNumber(data.totalCredits || 0);
             document.getElementById('activeAccounts').textContent = data.activeCount || 0;
             document.getElementById('totalAccounts').textContent = data.totalCount || 0;
+
+            // 显示每个模型的总配额
+            const modelTotalsContainer = document.getElementById('modelTotalsContainer');
+            const modelTotals = data.modelTotals || {};
+
+            if (Object.keys(modelTotals).length > 0) {
+                const modelTotalsHtml = Object.entries(modelTotals)
+                    .map(([modelId, info]) => `
+                        <div style="display: flex; justify-content: space-between; align-items: center; padding: 12px 20px; background: #f8f9fa; border-radius: 8px; margin-bottom: 10px;">
+                            <span style="font-weight: 600; color: #333;">${escapeHtml(info.displayName || modelId)}</span>
+                            <div style="display: flex; align-items: center; gap: 15px;">
+                                <span style="font-size: 0.9em; color: #666;">${info.accountCount} 个账号</span>
+                                <span style="font-size: 1.3em; font-weight: bold; color: ${info.averagePercent > 50 ? '#28a745' : info.averagePercent > 20 ? '#ffc107' : '#dc3545'};">
+                                    ${info.averagePercent}%
+                                </span>
+                            </div>
+                        </div>
+                    `).join('');
+
+                modelTotalsContainer.innerHTML = `
+                    <div style="margin-bottom: 15px;">
+                        <h3 style="font-size: 1.1em; color: #333; margin-bottom: 15px;">📊 模型配额统计</h3>
+                        ${modelTotalsHtml}
+                    </div>
+                `;
+            } else {
+                modelTotalsContainer.innerHTML = '';
+            }
 
             // 显示账号列表
             if (!data.accounts || data.accounts.length === 0) {
@@ -345,34 +447,63 @@
                 return;
             }
 
-            accountsList.innerHTML = data.accounts.map(account => `
-                <div class="account-item">
-                    <div class="account-header">
-                        <span class="account-label">${escapeHtml(account.label || '未命名账号')}</span>
-                        <span class="account-status ${account.enabled ? 'status-active' : 'status-inactive'}">
-                            ${account.enabled ? '✓ 活跃' : '✗ 禁用'}
-                        </span>
+            accountsList.innerHTML = data.accounts.map(account => {
+                const creditsInfo = account.creditsInfo || { models: {}, summary: {} };
+                const models = creditsInfo.models || {};
+                const summary = creditsInfo.summary || {};
+
+                // 生成模型配额列表
+                const modelsHtml = Object.entries(models)
+                    .filter(([_, info]) => info.recommended) // 只显示推荐模型
+                    .map(([modelId, info]) => `
+                        <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px 0; border-bottom: 1px solid #eee;">
+                            <span style="font-size: 0.9em; color: #666;">${escapeHtml(info.displayName || modelId)}</span>
+                            <div style="display: flex; align-items: center; gap: 10px;">
+                                <span style="font-weight: 500; color: ${info.remainingPercent > 50 ? '#28a745' : info.remainingPercent > 20 ? '#ffc107' : '#dc3545'};">
+                                    ${info.remainingPercent}%
+                                </span>
+                                <span style="font-size: 0.85em; color: #999;">
+                                    ${formatResetTime(info.resetTime)}
+                                </span>
+                            </div>
+                        </div>
+                    `).join('');
+
+                return `
+                    <div class="account-item">
+                        <div class="account-header">
+                            <span class="account-label">${escapeHtml(account.label || '未命名账号')}</span>
+                            <span class="account-status ${account.enabled ? 'status-active' : 'status-inactive'}">
+                                ${account.enabled ? '✓ 活跃' : '✗ 禁用'}
+                            </span>
+                        </div>
+                        <div class="account-details">
+                            <div class="detail-item">
+                                <span class="detail-label">平均配额</span>
+                                <span class="detail-value">${Math.round((summary.averageRemaining || 0) * 100)}%</span>
+                            </div>
+                            <div class="detail-item">
+                                <span class="detail-label">模型数量</span>
+                                <span class="detail-value">${summary.totalModels || 0}</span>
+                            </div>
+                            <div class="detail-item">
+                                <span class="detail-label">项目 ID</span>
+                                <span class="detail-value">${escapeHtml(account.projectId || 'N/A')}</span>
+                            </div>
+                            <div class="detail-item">
+                                <span class="detail-label">添加时间</span>
+                                <span class="detail-value">${formatDate(account.created_at)}</span>
+                            </div>
+                        </div>
+                        ${modelsHtml ? `
+                            <div style="margin-top: 15px; padding-top: 15px; border-top: 2px solid #f0f0f0;">
+                                <div style="font-weight: 600; margin-bottom: 10px; color: #333;">推荐模型配额</div>
+                                ${modelsHtml}
+                            </div>
+                        ` : ''}
                     </div>
-                    <div class="account-details">
-                        <div class="detail-item">
-                            <span class="detail-label">剩余 Credits</span>
-                            <span class="detail-value">${formatNumber(account.credits || 0)}</span>
-                        </div>
-                        <div class="detail-item">
-                            <span class="detail-label">重置时间</span>
-                            <span class="detail-value">${formatResetTime(account.resetTime)}</span>
-                        </div>
-                        <div class="detail-item">
-                            <span class="detail-label">项目 ID</span>
-                            <span class="detail-value">${escapeHtml(account.projectId || 'N/A')}</span>
-                        </div>
-                        <div class="detail-item">
-                            <span class="detail-label">添加时间</span>
-                            <span class="detail-value">${formatDate(account.created_at)}</span>
-                        </div>
-                    </div>
-                </div>
-            `).join('');
+                `;
+            }).join('');
         }
 
         // 格式化数字
@@ -392,11 +523,17 @@
 
                 const days = Math.floor(diff / (1000 * 60 * 60 * 24));
                 const hours = Math.floor((diff % (1000 * 60 * 60 * 24)) / (1000 * 60 * 60));
+                const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
+                const seconds = Math.floor((diff % (1000 * 60)) / 1000);
 
                 if (days > 0) {
-                    return `${days}天${hours}小时`;
+                    return `${days}天${hours}时${minutes}分${seconds}秒`;
+                } else if (hours > 0) {
+                    return `${hours}时${minutes}分${seconds}秒`;
+                } else if (minutes > 0) {
+                    return `${minutes}分${seconds}秒`;
                 } else {
-                    return `${hours}小时`;
+                    return `${seconds}秒`;
                 }
             } catch {
                 return 'N/A';
