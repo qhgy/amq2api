@@ -5,7 +5,7 @@ FastAPI 服务器，提供 Claude API 兼容的接口
 import logging
 import httpx
 from typing import Optional
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, Header, Depends
 from fastapi.responses import StreamingResponse
 from contextlib import asynccontextmanager
 
@@ -71,6 +71,25 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# 管理员鉴权依赖
+async def verify_admin_key(x_admin_key: Optional[str] = Header(None)):
+    """验证管理员密钥"""
+    import os
+    admin_key = os.getenv("ADMIN_KEY")
+
+    # 如果没有设置 ADMIN_KEY，则不需要验证
+    if not admin_key:
+        return True
+
+    # 如果设置了 ADMIN_KEY，则必须验证
+    if not x_admin_key or x_admin_key != admin_key:
+        raise HTTPException(
+            status_code=403,
+            detail="访问被拒绝：需要有效的管理员密钥。请在请求头中添加 X-Admin-Key"
+        )
+    return True
 
 
 # Pydantic 模型
@@ -620,14 +639,14 @@ async def create_gemini_message(request: Request):
 
 # 账号管理 API 端点
 @app.get("/v2/accounts")
-async def list_accounts():
+async def list_accounts(_: bool = Depends(verify_admin_key)):
     """列出所有账号"""
     accounts = list_all_accounts()
     return JSONResponse(content=accounts)
 
 
 @app.get("/v2/accounts/{account_id}")
-async def get_account_detail(account_id: str):
+async def get_account_detail(account_id: str, _: bool = Depends(verify_admin_key)):
     """获取账号详情"""
     account = get_account(account_id)
     if not account:
@@ -636,7 +655,7 @@ async def get_account_detail(account_id: str):
 
 
 @app.post("/v2/accounts")
-async def create_account_endpoint(body: AccountCreate):
+async def create_account_endpoint(body: AccountCreate, _: bool = Depends(verify_admin_key)):
     """创建新账号"""
     try:
         account = create_account(
@@ -656,7 +675,7 @@ async def create_account_endpoint(body: AccountCreate):
 
 
 @app.patch("/v2/accounts/{account_id}")
-async def update_account_endpoint(account_id: str, body: AccountUpdate):
+async def update_account_endpoint(account_id: str, body: AccountUpdate, _: bool = Depends(verify_admin_key)):
     """更新账号信息"""
     try:
         account = update_account(
@@ -680,7 +699,7 @@ async def update_account_endpoint(account_id: str, body: AccountUpdate):
 
 
 @app.delete("/v2/accounts/{account_id}")
-async def delete_account_endpoint(account_id: str):
+async def delete_account_endpoint(account_id: str, _: bool = Depends(verify_admin_key)):
     """删除账号"""
     success = delete_account(account_id)
     if not success:
@@ -689,7 +708,7 @@ async def delete_account_endpoint(account_id: str):
 
 
 @app.post("/v2/accounts/{account_id}/refresh")
-async def manual_refresh_endpoint(account_id: str):
+async def manual_refresh_endpoint(account_id: str, _: bool = Depends(verify_admin_key)):
     """手动刷新账号 token"""
     try:
         account = get_account(account_id)
@@ -730,7 +749,7 @@ async def manual_refresh_endpoint(account_id: str):
 
 
 @app.get("/v2/accounts/{account_id}/quota")
-async def get_account_quota(account_id: str):
+async def get_account_quota(account_id: str, _: bool = Depends(verify_admin_key)):
     """获取 Gemini 账号配额信息"""
     try:
         account = get_account(account_id)
