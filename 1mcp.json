@@ -1,0 +1,89 @@
+{
+  "mcpServers": {
+    "taskmaster-ai": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "--package=task-master-ai",
+        "task-master-ai"
+      ],
+      "env": {
+        "ANTHROPIC_API_KEY": "YOUR_ANTHROPIC_API_KEY_HERE",
+        "PERPLEXITY_API_KEY": "YOUR_PERPLEXITY_API_KEY_HERE",
+        "OPENAI_API_KEY": "YOUR_OPENAI_KEY_HERE",
+        "GOOGLE_API_KEY": "AIzaSyDou_vCYjDyEm-IZ3sSAfyzq8g-yh0Ewaw",
+        "MISTRAL_API_KEY": "YOUR_MISTRAL_KEY_HERE",
+        "OPENROUTER_API_KEY": "YOUR_OPENROUTER_KEY_HERE",
+        "XAI_API_KEY": "YOUR_XAI_KEY_HERE",
+        "AZURE_OPENAI_API_KEY": "YOUR_AZURE_KEY_HERE"
+      }
+    },
+    "mfe": {
+      "command": "uvx",
+      "args": [
+        "mcp-feedback-enhanced@latest"
+      ],
+      "timeout": 600,
+      "autoApprove": [
+        "interactive_feedback"
+      ]
+    },
+    "mem": {
+      "command": "cmd",
+      "args": [
+        "/c",
+        "npx",
+        "-y",
+        "supergateway",
+        "--sse",
+        "http://localhost:8765/mcp/cursor/sse/default-user"
+      ]
+    },
+    "acemcp": {
+      "command": "npx",
+      "args": ["acemcp-node"],
+      "env": {}
+    },
+    "mcp-deepwiki": {
+      "args": [
+        "-y",
+        "mcp-deepwiki@latest"
+      ],
+      "command": "npx"
+    },
+    "寸止": {
+      "command": "寸止"
+    },
+    "context7-mcp": {
+      "timeout": 60,
+      "autoApprove": [],
+      "transportType": "stdio",
+      "disabled": false,
+      "command": "bunx",
+      "args": [
+        "-y",
+        "@upstash/context7-mcp"
+      ]
+    },
+    "Desktop Commander": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@smithery/cli@latest",
+        "run",
+        "@wonderwhy-er/desktop-commander",
+        "--key",
+        "bcf31d62-c299-403e-91d6-e7982a969eee"
+      ],
+      "env": {}
+    },
+    "chrome-devtools": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "chrome-devtools-mcp@latest"
+      ]
+    }
+  }
+}

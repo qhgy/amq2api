@@ -73,6 +73,26 @@ app.add_middleware(
 )
 
 
+# API Key 鉴权依赖
+async def verify_api_key(authorization: Optional[str] = Header(None)):
+    """验证 API Key（通过 Authorization: Bearer xxx 或 x-api-key 头）"""
+    import os
+    api_key = os.getenv("API_KEY")
+    
+    # 如果没有设置 API_KEY，跳过验证
+    if not api_key:
+        return True
+    
+    # 从 Authorization: Bearer xxx 提取 key
+    if authorization:
+        if authorization.startswith("Bearer "):
+            provided_key = authorization[7:]
+            if provided_key == api_key:
+                return True
+    
+    raise HTTPException(status_code=401, detail="Invalid API Key")
+
+
 # 管理员鉴权依赖
 async def verify_admin_key(x_admin_key: Optional[str] = Header(None)):
     """验证管理员密钥"""
@@ -154,7 +174,7 @@ async def health():
 
 
 @app.post("/v1/messages")
-async def create_message(request: Request):
+async def create_message(request: Request, _: bool = Depends(verify_api_key)):
     """
     Claude API 兼容的消息创建端点（智能路由）
     根据模型和账号数量自动选择渠道（Amazon Q 或 Gemini）
@@ -448,7 +468,7 @@ async def create_message(request: Request):
 
 
 @app.post("/v1/gemini/messages")
-async def create_gemini_message(request: Request):
+async def create_gemini_message(request: Request, _: bool = Depends(verify_api_key)):
     """
     Gemini API 端点
     接收 Claude 格式的请求，转换为 Gemini 格式并返回流式响应

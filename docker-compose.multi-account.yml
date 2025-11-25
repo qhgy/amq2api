@@ -1,0 +1,70 @@
+version: '3.8'
+
+# Multi-account deployment for Amazon Q to Claude API Proxy
+# Each service runs on a different port with different credentials
+
+services:
+  # Account 1: gpzy
+  amq2api-gpzy:
+    build: .
+    container_name: amq2api-gpzy
+    ports:
+      - "18100:8080"
+    env_file:
+      - .env.gpzy
+    environment:
+      - PORT=8080
+    volumes:
+      - token_cache_gpzy:/home/appuser
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+  # Account 2: 245
+  amq2api-245:
+    build: .
+    container_name: amq2api-245
+    ports:
+      - "18101:8080"
+    env_file:
+      - .env.245
+    environment:
+      - PORT=8080
+    volumes:
+      - token_cache_245:/home/appuser
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+  # Account 3: 2nd
+  amq2api-2nd:
+    build: .
+    container_name: amq2api-2nd
+    ports:
+      - "18102:8080"
+    env_file:
+      - .env.2nd
+    environment:
+      - PORT=8080
+    volumes:
+      - token_cache_2nd:/home/appuser
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  token_cache_gpzy:
+  token_cache_245:
+  token_cache_2nd:
